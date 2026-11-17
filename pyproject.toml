@@ -16,6 +16,7 @@ dependencies = [
     "rustymimi>=0.2.2",
     "fastapi>=0.109.0",
     "uvicorn>=0.27.0",
+    "websockets>=12.0",
     "numpy>=1.24.0",
     "torch>=2.0.0",
     "sentencepiece>=0.1.99",
@@ -30,28 +31,7 @@ dev = [
 
 [project.scripts]
 personaplex = "live_server_mlx:main"
-
-[tool.uv.scripts]
-serve = "python live_server_mlx.py"
-test = "python test_pytorch_mlx_comparison.py"
-download-weights = """python -c "
-from huggingface_hub import snapshot_download
-import os
-
-print('Downloading PersonaPlex weights from HuggingFace...')
-print('This will download ~17GB of model weights.')
-print()
-
-snapshot_download(
-    'nvidia/personaplex-7b-v1',
-    local_dir='weights',
-    ignore_patterns=['*.md', '*.txt', 'figures/*']
-)
-
-print()
-print('Done! Weights saved to weights/')
-"
-"""
+serve = "live_server_mlx:main"
 
 [tool.ruff]
 line-length = 100

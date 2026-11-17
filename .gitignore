@@ -42,3 +42,13 @@ nohup.out
 # Testing artifacts
 test_*.wav
 test_*.json
+
+# Local debug artifacts
+mic_received.wav
+live_server_mlx.py.before_mic_test
+
+# Editor/OS backups
+*.bak
+
+# Weight archives
+weights/*.tgz
