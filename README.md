@@ -201,6 +201,32 @@ Use `{"type":"session.reset","keep_context":false}` to forget them as well.
 Changing voice or quantization is refused while a session is live: both rewrite
 the shared KV cache, which would corrupt an active conversation.
 
+## Record tool-calling examples
+
+Open [Audio labeler](http://127.0.0.1:8000/training/) from the voice runner on
+the same Mac. To open it without starting PersonaPlex, run
+`.venv/bin/python tools/audio_labeler.py` and visit the
+[standalone labeler](http://127.0.0.1:8765/).
+
+1. Use **Space** or **Record** to start recording, then press **Space** or
+   **Stop recording** to finish. Once the clip is ready, **Space** plays or
+   pauses it. Choose **Record again** to replace the take. Select a marker
+   before clicking the waveform. **Ready** marks when the required arguments
+   are grounded in the audio. **Turn end** starts at the clip end and can be
+   moved earlier to exclude trailing silence.
+2. Enter the transcript and select the expected outcome. For an incomplete
+   request, choose **Missing or unclear argument** and mark when the tool intent
+   becomes clear. For a complete call, enter the expected arguments as JSON.
+3. Select **Save example**. The WAV and its annotation are written under
+   `tool_data/`, with clips in `audio/`, immutable schema snapshots in
+   `catalogs/`, and one row per clip in `manifest.jsonl`.
+
+The example catalog is available for practice. **Import JSON** accepts a list of
+tools, an object with a `tools` array, or the JSON-RPC response from MCP
+`tools/list`. Each tool definition needs a unique `name` and an object
+`inputSchema`. For native tools, export the same fields from your app. The labeler
+uses these definitions for annotation.
+
 ## Scripts
 
 | Command | Description |

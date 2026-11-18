@@ -27,6 +27,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 
 import kv_pinning
+import mic_backlog
+from tools.audio_labeler import DEFAULT_DATA_DIR, create_app as create_labeler_app
 
 # Must happen before the model is built: it changes how the transformer's KV
 # caches are sized (window = cfg.context, not max_seq_len) so the system prompt
@@ -100,6 +102,13 @@ INJECT_MUTE_FRAMES = int(os.environ.get("PERSONAPLEX_INJECT_MUTE_FRAMES", "12"))
 # reset take longer and longer. Keep the most recent facts up to this budget.
 MAX_CONTEXT_TOKENS = int(os.environ.get("PERSONAPLEX_MAX_CONTEXT_TOKENS",
                                         str(4 * MAX_INJECT_TOKENS)))
+# Mic audio buffered while the LM is busy. Sized in time, not frames: the old
+# 4-frame (320ms) queue turned every ~0.7-1s injection stall into dropped speech,
+# which Mimi sees as chopped audio. 2.5s is absorbed and replayed because an LM
+# step (~26ms) is much faster than a frame of audio (80ms). See mic_backlog.py.
+MIC_BACKLOG_FRAMES = mic_backlog.frames_for(
+    mic_backlog.DEFAULT_BACKLOG_S, FRAME_RATE
+)
 
 WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
 VOICES_DIR = WEIGHTS_DIR / "voices_cpu"
@@ -611,6 +620,7 @@ def load_model():
 
 # FastAPI app
 app = FastAPI(title="PersonaPlex MLX Live")
+app.mount("/training", create_labeler_app(DEFAULT_DATA_DIR))
 
 
 @app.on_event("startup")
@@ -805,13 +815,13 @@ async def websocket_endpoint(websocket: WebSocket):
     # Encoding and decoding are ~25ms each and independent of each other, so each
     # gets its own thread and overlaps with the LM step. That takes the per-frame
     # critical path from ~95ms (encode+LM+decode, serial) to ~45ms, comfortably
-    # inside the 80ms budget. Dropping mic frames is then a rare fallback instead
-    # of the normal case: at ~20% loss the model can no longer understand you and
-    # just repeats its canned greeting.
-    raw_q: queue.Queue = queue.Queue(maxsize=4)     # (frame, mic_rms)
+    # inside the 80ms budget. Mic audio that arrives while the LM is busy (an
+    # applied context update is the common case) is backlogged and replayed
+    # rather than dropped: the LM is faster than realtime, so it catches up.
+    raw_q = mic_backlog.BoundedBacklog(MIC_BACKLOG_FRAMES, FRAME_RATE, "mic")
     out_q: queue.Queue = queue.Queue(maxsize=3)     # (moshi_tokens, mic_rms)
     pcm_q: queue.Queue = queue.Queue(maxsize=6)     # (pcm_bytes, mic_rms, out_rms)
-    tok_q: asyncio.Queue = asyncio.Queue(maxsize=3)  # (user_tokens, mic_rms)
+    tok_q: asyncio.Queue = asyncio.Queue(maxsize=MIC_BACKLOG_FRAMES)  # (user_tokens, mic_rms)
     loop = asyncio.get_running_loop()
     STOP = object()
 
@@ -911,7 +921,19 @@ async def websocket_endpoint(websocket: WebSocket):
 
     def put_tokens(item):
         # Called from the encoder thread; put_nowait on an asyncio.Queue is only
-        # safe through call_soon_threadsafe.
+        # safe through call_soon_threadsafe. Overflow drops the oldest backlog,
+        # matching raw_q: when a stall outruns the budget, the newest speech is
+        # the part worth keeping.
+        try:
+            tok_q.put_nowait(item)
+            return
+        except asyncio.QueueFull:
+            pass
+        try:
+            tok_q.get_nowait()
+            dropped[0] += 1
+        except asyncio.QueueEmpty:
+            pass
         try:
             tok_q.put_nowait(item)
         except asyncio.QueueFull:
@@ -960,16 +982,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     if len(mic_capture) == 125:
                         save_mic_capture()
                 mic_rms = float(np.sqrt(np.mean(frame ** 2)))
-                while True:
-                    try:
-                        raw_q.put_nowait((frame, mic_rms))
-                        break
-                    except queue.Full:
-                        try:
-                            raw_q.get_nowait()
-                            dropped[0] += 1
-                        except queue.Empty:
-                            pass
+                # Bounded and time-sized: overflow keeps the freshest audio and
+                # is counted as dropped (see mic_backlog.py).
+                raw_q.put((frame, mic_rms))
         except (WebSocketDisconnect, RuntimeError):
             disconnected.set()
         except Exception as e:
@@ -1325,6 +1340,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         "frames": frame_count,
                         "avg_latency_ms": round(avg_latency, 1),
                         "rtf": round(rtf, 2),
+                        "backlog_frames": raw_q.qsize(),
+                        "backlog_peak": raw_q.peak,
+                        "mic_frames_lost": raw_q.dropped + dropped[0],
                     }
                     send_event(stats)
 
@@ -1355,23 +1373,33 @@ async def websocket_endpoint(websocket: WebSocket):
                     pass
         if LOG_TEXT:
             print(flush=True)
+        lost = raw_q.dropped + dropped[0]
+        absorbed = raw_q.peak
         print(
-            f"Session done: {frame_count} frames, {dropped[0]} stale mic frames dropped",
+            f"Session done: {frame_count} frames, mic backlog peak {absorbed} "
+            f"frames ({absorbed / FRAME_RATE:.1f}s), {lost} frames lost",
             flush=True,
         )
-        # Dropped mic frames are not just latency: each one is 80ms of missing
+        if lost == 0 and absorbed > 4:
+            print(
+                f"  Buffered {absorbed} frames of audio during LM stalls and "
+                f"replayed them all - nothing the user said was lost.",
+                flush=True,
+            )
+        # Lost mic frames are not just latency: each one is 80ms of missing
         # speech, so Mimi sees a chopped token stream and the model answers
         # something unrelated. Make that loud instead of a silent stat.
-        sent_or_dropped = frame_count + dropped[0]
-        if dropped[0] and dropped[0] > max(5, sent_or_dropped // 20):
-            pct = 100 * dropped[0] / max(1, sent_or_dropped)
+        sent_or_dropped = frame_count + lost
+        if lost and lost > max(5, sent_or_dropped // 20):
+            pct = 100 * lost / max(1, sent_or_dropped)
             print(
-                f"  ! WARNING: {pct:.0f}% of mic frames were dropped - the machine "
-                f"cannot keep up in real time.\n"
+                f"  ! WARNING: {pct:.0f}% of mic frames were lost - the stall "
+                f"outlasted the {MIC_BACKLOG_FRAMES}-frame "
+                f"({MIC_BACKLOG_FRAMES / FRAME_RATE:.1f}s) backlog.\n"
                 f"    This garbles the model's audio tokens and is the usual cause "
                 f"of replies that ignore what was said.\n"
                 f"    Check `top` for other CPU hogs (browsers, CI runners, Xcode), "
-                f"or run 4-bit (/set-quant).",
+                f"run 4-bit (/set-quant), or raise PERSONAPLEX_MIC_BACKLOG_S.",
                 flush=True,
             )
 
@@ -1632,6 +1660,7 @@ HTML_CLIENT = """
     <h1>PersonaPlex MLX</h1>
     <p class="subtitle">Live Voice Conversation on Apple Silicon</p>
     <div class="badge">MLX Backend + Voice Conditioning</div>
+    <p style="margin: 10px 0 0;"><a href="/training/" style="color: #90caf9;">Audio labeler</a></p>
 
     <div class="container">
         <div class="config-panel">

@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audio Labeler · PersonaPlex</title>
+<style>
+    :root {
+        color-scheme: light;
+        font-family: "Inter", system-ui, sans-serif;
+        color: #192338;
+        background: #f3f5f8;
+        --border: #d9e1ea;
+        --muted: #526177;
+        --blue: #214fd0;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 1060px; padding: 48px 24px; margin: 0 auto; }
+    header { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 25px; }
+    h1 { font-size: clamp(28px, 5vw, 42px); margin: 0 0 6px; letter-spacing: -.045em; }
+    h2 { font-size: 18px; margin: 0 0 16px; letter-spacing: -.02em; }
+    p { margin: 0; }
+    .muted, small { color: var(--muted); }
+    small { display: block; line-height: 1.45; }
+    a { color: var(--blue); }
+    .layout { display: grid; grid-template-columns: 1.28fr 1fr; gap: 16px; align-items: start; }
+    section { border: 1px solid var(--border); background: white; padding: 20px; border-radius: 15px; }
+    .row { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; }
+    .split { justify-content: space-between; }
+    label { font-size: 14px; font-weight: 600; display: block; }
+    input, select, textarea, button { font: inherit; color: inherit; }
+    input, select, textarea { width: 100%; margin-top: 5px; background: #fff; padding: 8px 10px; border: 1px solid #b9c7d8; border-radius: 8px; }
+    textarea { display: block; resize: vertical; min-height: 68px; }
+    textarea.code { font-family: ui-monospace, monospace; font-size: 13px; }
+    button { cursor: pointer; background: white; border: 1px solid #b9c7d8; padding: 7px 12px; border-radius: 8px; }
+    button:hover:not(:disabled) { background: #edf2fe; }
+    button:disabled { opacity: .55; cursor: default; }
+    .primary { color: white; background: var(--blue); border-color: var(--blue); font-weight: 600; }
+    .primary:hover:not(:disabled) { background: #1843ba; }
+    .recording { color: white; background: #a92136; border-color: #a92136; }
+    .recording:hover:not(:disabled) { background: #90182b; }
+    :focus-visible { outline: 2px solid #3366e7; outline-offset: 3px; }
+    .field, .controls { margin-top: 14px; }
+    .controls { display: grid; gap: 12px; }
+    .time { font-variant-numeric: tabular-nums; font-size: 14px; color: var(--muted); }
+    kbd { border: 1px solid var(--border); padding: 2px 5px; border-radius: 4px; background: #f8fafc; }
+    .wave { position: relative; margin-top: 13px; background: #edf2f8; border-radius: 9px; overflow: hidden; }
+    canvas { display: block; width: 100%; height: 120px; }
+    .wave.has-audio { cursor: crosshair; }
+    #waveHint { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; text-align: center; }
+    audio { width: 100%; display: block; margin-top: 10px; height: 36px; }
+    .timing { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }
+    .marker { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+    .marker input { width: auto; margin: 0; accent-color: var(--blue); }
+    #status { min-height: 20px; margin-top: 13px; font-size: 14px; overflow-wrap: anywhere; }
+    #status[data-kind="error"] { color: #a92136; }
+    #status[data-kind="success"] { color: #13644b; }
+    .secondary { font-size: 13px; }
+    #schema { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+    .field small { margin-top: 4px; }
+    [hidden] { display: none !important; }
+    @media (max-width: 760px) {
+        main { padding: 27px 13px; }
+        header { display: block; }
+        header a { display: inline-block; margin-top: 8px; }
+        .layout { grid-template-columns: 1fr; }
+        section { padding: 16px; }
+    }
+</style>
+</head>
+<body>
+<main>
+    <header>
+        <div>
+            <h1>Audio labeler</h1>
+            <p class="muted">Record a request and mark when it becomes actionable.</p>
+        </div>
+        <a class="secondary" id="runnerLink" href="http://127.0.0.1:8000/">Voice runner ↗</a>
+    </header>
+    <form id="labelForm">
+        <div class="layout">
+            <section aria-labelledby="captureTitle">
+                <h2 id="captureTitle">Record and mark</h2>
+                <div class="row split">
+                    <div class="row">
+                        <button type="button" class="primary" id="primaryAction">Record</button>
+                        <button type="button" id="recordAgain" hidden>Record again</button>
+                        <small><kbd>Space</kbd> <span id="spaceAction">to record</span></small>
+                    </div>
+                    <span id="clock" class="time">0.000 s</span>
+                </div>
+                <div class="wave" id="wavePanel">
+                    <canvas id="wave" aria-label="Waveform. Exact timings can also be entered in the fields below."></canvas>
+                    <small id="waveHint">Record a clip to see its waveform.</small>
+                </div>
+                <audio id="playback" controls hidden aria-label="Recorded clip"></audio>
+                <div class="controls" id="timingControls" hidden>
+                    <small>Choose a marker, then click the waveform. You can also enter the time in seconds.</small>
+                    <div class="timing">
+                        <div id="readyTiming">
+                            <label class="marker"><input type="radio" name="marker" value="ready" checked> Ready</label>
+                            <input type="number" id="ready" aria-label="Ready time in seconds" min="0.001" step="0.001" placeholder="Seconds">
+                        </div>
+                        <div id="intentTiming">
+                            <label class="marker"><input type="radio" name="marker" value="intent"> Intent</label>
+                            <input type="number" id="intent" aria-label="Intent time in seconds" min="0" step="0.001" placeholder="Seconds">
+                        </div>
+                        <div>
+                            <label class="marker"><input type="radio" name="marker" value="turnEnd"> Turn end</label>
+                            <input type="number" id="turnEnd" aria-label="Turn end in seconds" min="0.001" step="0.001" placeholder="Seconds">
+                        </div>
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="transcript">Transcript</label>
+                    <textarea id="transcript" maxlength="8000" required placeholder="Type the words as spoken."></textarea>
+                </div>
+            </section>
+
+            <section aria-labelledby="labelTitle">
+                <h2 id="labelTitle">Expected outcome</h2>
+                <div class="field">
+                    <label for="speaker">Speaker ID</label>
+                    <input id="speaker" value="speaker_01" maxlength="100" required autocomplete="off">
+                </div>
+                <div class="field">
+                    <div class="row split">
+                        <label for="catalog">Tool catalog</label>
+                        <button type="button" id="importButton" class="secondary">Import JSON</button>
+                        <input type="file" id="catalogFile" accept=".json,application/json" hidden>
+                    </div>
+                    <select id="catalog" required></select>
+                    <small id="catalogHelp">Import tool definitions from MCP or your app.</small>
+                </div>
+                <div class="field">
+                    <label for="outcome">Label</label>
+                    <select id="outcome">
+                        <option value="call">Tool call</option>
+                        <option value="underspecified">Missing or unclear argument</option>
+                        <option value="no_call">No call</option>
+                    </select>
+                </div>
+                <div class="field" id="toolField">
+                    <label for="tool">Expected tool</label>
+                    <select id="tool"></select>
+                    <small id="toolDescription"></small>
+                </div>
+                <div class="field" id="argumentsField">
+                    <label for="arguments">Arguments (JSON)</label>
+                    <textarea class="code" id="arguments" spellcheck="false" placeholder="{}"></textarea>
+                    <small id="requiredKeys"></small>
+                    <details id="schemaDetails" hidden><summary class="secondary">Input schema</summary><pre id="schema"></pre></details>
+                </div>
+                <div class="field">
+                    <button type="submit" id="save" class="primary" disabled>Save example</button>
+                    <p id="status" role="status" aria-live="polite"></p>
+                </div>
+            </section>
+        </div>
+    </form>
+</main>
+<script>
+"use strict";
+
+const byId = id => document.getElementById(id);
+const SAMPLE_RATE = 24000;
+const MAX_SECONDS = 60;
+const form = byId("labelForm");
+const primaryButton = byId("primaryAction");
+const recordAgainButton = byId("recordAgain");
+const saveButton = byId("save");
+const player = byId("playback");
+const canvas = byId("wave");
+const catalogSelect = byId("catalog");
+const toolSelect = byId("tool");
+const outcomeSelect = byId("outcome");
+const timing = {ready: byId("ready"), intent: byId("intent"), turnEnd: byId("turnEnd")};
+const colors = {ready: "#126b52", intent: "#825506", turnEnd: "#923e76"};
+if (location.pathname.endsWith("/training/")) byId("runnerLink").href = "../";
+let catalogs = [];
+let recorder;
+let clockTimer;
+let stopTimer;
+let busy = false;
+let clip;
+
+function status(message, kind = "") {
+    const line = byId("status");
+    line.textContent = message;
+    line.dataset.kind = kind;
+}
+
+function refreshControls() {
+    const recording = recorder?.state === "recording";
+    const reviewing = clip && !recording;
+    if (reviewing) {
+        primaryButton.textContent = player.paused || player.ended ? "Play clip" : "Pause clip";
+        byId("spaceAction").textContent = "to play or pause";
+    } else {
+        primaryButton.textContent = recording ? "Stop recording" : "Record";
+        byId("spaceAction").textContent = recording ? "to stop recording" : "to record";
+    }
+    primaryButton.classList.toggle("recording", recording);
+    primaryButton.disabled = busy;
+    recordAgainButton.hidden = !reviewing;
+    recordAgainButton.disabled = busy;
+    saveButton.disabled = busy || recording || !clip || !catalogSelect.value;
+}
+
+async function request(path, body) {
+    const options = body ? {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body),
+    } : undefined;
+    const response = await fetch(path, options);
+    const value = await response.json();
+    if (!response.ok) {
+        const detail = value.detail;
+        const message = Array.isArray(detail) ? detail.map(item => item.msg).join(" ") : detail;
+        throw new Error(message || "Request failed. Try again.");
+    }
+    return value;
+}
+
+function setOptions(select, options, placeholder) {
+    const entries = options.map(([value, label]) => new Option(label, value));
+    if (placeholder) entries.unshift(new Option(placeholder, ""));
+    select.replaceChildren(...entries);
+}
+
+function activeTool() {
+    const catalog = catalogs.find(entry => entry.id === catalogSelect.value);
+    return catalog?.tools.find(tool => tool.name === toolSelect.value);
+}
+
+function showSchema() {
+    const tool = activeTool();
+    byId("toolDescription").textContent = tool?.description || "";
+    const keys = tool?.inputSchema.required || [];
+    byId("requiredKeys").textContent = tool ? (keys.length ? "Required: " + keys.join(", ") : "No required arguments.") : "";
+    byId("schema").textContent = tool ? JSON.stringify(tool.inputSchema, null, 2) : "";
+    byId("schemaDetails").hidden = !tool;
+    byId("arguments").value = tool && !keys.length ? "{}" : "";
+}
+
+function showTools() {
+    const catalog = catalogs.find(entry => entry.id === catalogSelect.value);
+    const tools = catalog?.tools || [];
+    setOptions(toolSelect, tools.map(tool => [tool.name, tool.title || tool.name]), "Choose a tool");
+    byId("catalogHelp").textContent = tools.length
+        ? tools.length + (tools.length === 1 ? " tool" : " tools") + " available. Open Expected tool to choose one."
+        : "Import tool definitions from MCP or your app.";
+    showSchema();
+    refreshControls();
+}
+
+function selectCatalog(id) {
+    setOptions(catalogSelect, catalogs.map(entry => [entry.id, entry.name]));
+    if (catalogs.some(entry => entry.id === id)) catalogSelect.value = id;
+    showTools();
+}
+
+catalogSelect.addEventListener("change", showTools);
+toolSelect.addEventListener("change", showSchema);
+byId("importButton").addEventListener("click", () => byId("catalogFile").click());
+byId("catalogFile").addEventListener("change", async event => {
+    const file = event.target.files[0];
+    if (!file) return;
+    try {
+        const document = JSON.parse(await file.text());
+        const tools = Array.isArray(document) ? document : document.tools || document.result?.tools;
+        if (!Array.isArray(tools) || !tools.length) throw new Error("The file needs a list of tool definitions.");
+        const name = (document.name || file.name.replace(/\.json$/i, "")).slice(0, 160);
+        const catalog = await request("api/catalogs", {name, tools});
+        catalogs = catalogs.filter(entry => entry.id !== catalog.id).concat(catalog);
+        selectCatalog(catalog.id);
+        status("Imported " + catalog.name + ".", "success");
+    } catch (error) {
+        status(error.message, "error");
+    } finally {
+        event.target.value = "";
+    }
+});
+
+function updateOutcome() {
+    const outcome = outcomeSelect.value;
+    byId("toolField").hidden = outcome === "no_call";
+    byId("argumentsField").hidden = outcome !== "call";
+    byId("readyTiming").hidden = outcome !== "call";
+    byId("intentTiming").hidden = outcome === "no_call";
+    timing.ready.disabled = outcome !== "call";
+    timing.intent.disabled = outcome === "no_call";
+    const selected = outcome === "call" ? "ready" : outcome === "underspecified" ? "intent" : "turnEnd";
+    form.querySelector('input[name="marker"][value="' + selected + '"]').checked = true;
+    draw();
+}
+outcomeSelect.addEventListener("change", updateOutcome);
+
+function draw() {
+    const rect = canvas.getBoundingClientRect();
+    const scale = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.round(rect.width * scale));
+    canvas.height = Math.max(1, Math.round(rect.height * scale));
+    const ctx = canvas.getContext("2d");
+    ctx.scale(scale, scale);
+    const height = rect.height;
+    const width = Math.ceil(rect.width);
+    const center = height / 2;
+    ctx.strokeStyle = "#b6c4d7";
+    ctx.beginPath();
+    ctx.moveTo(0, center);
+    ctx.lineTo(width, center);
+    ctx.stroke();
+    if (!clip || !width) return;
+
+    ctx.strokeStyle = "#4268ab";
+    ctx.beginPath();
+    for (let x = 0; x < width; x++) {
+        const from = Math.floor(x * clip.samples.length / width);
+        const to = Math.min(clip.samples.length, Math.max(from + 1, Math.floor((x + 1) * clip.samples.length / width)));
+        let low = 0;
+        let high = 0;
+        for (let i = from; i < to; i++) {
+            low = Math.min(low, clip.samples[i]);
+            high = Math.max(high, clip.samples[i]);
+        }
+        ctx.moveTo(x + .5, center - high * center);
+        ctx.lineTo(x + .5, center - low * center);
+    }
+    ctx.stroke();
+    for (const [key, field] of Object.entries(timing)) {
+        if (field.closest("[hidden]") || !field.value) continue;
+        const x = Math.min(width - 1, field.valueAsNumber * width / clip.duration);
+        ctx.strokeStyle = colors[key];
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, height);
+        ctx.stroke();
+    }
+    if (player.currentTime > 0) {
+        const x = Math.min(width - 1, player.currentTime * width / clip.duration);
+        ctx.strokeStyle = "#192338";
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, height);
+        ctx.stroke();
+    }
+}
+
+canvas.addEventListener("click", event => {
+    if (!clip) return;
+    const rect = canvas.getBoundingClientRect();
+    const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const time = Math.min(Math.floor(clip.duration * 1000), Math.round(clip.duration * fraction * 1000)) / 1000;
+    const marker = form.querySelector('input[name="marker"]:checked').value;
+    timing[marker].value = Math.max(Number(timing[marker].min), time).toFixed(3);
+    if (player.readyState) player.currentTime = time;
+    draw();
+});
+
+Object.values(timing).forEach(input => input.addEventListener("input", draw));
+player.addEventListener("timeupdate", draw);
+for (const event of ["play", "pause", "ended"]) {
+    player.addEventListener(event, refreshControls);
+}
+new ResizeObserver(draw).observe(canvas);
+
+function wavBlob(samples) {
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+    const tag = (offset, value) => {
+        for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i));
+    };
+    tag(0, "RIFF");
+    view.setUint32(4, buffer.byteLength - 8, true);
+    tag(8, "WAVE");
+    tag(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, SAMPLE_RATE, true);
+    view.setUint32(28, SAMPLE_RATE * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    tag(36, "data");
+    view.setUint32(40, samples.length * 2, true);
+    for (let i = 0; i < samples.length; i++) {
+        const sample = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(44 + i * 2, Math.round(sample * (sample < 0 ? 32768 : 32767)), true);
+    }
+    return new Blob([buffer], {type: "audio/wav"});
+}
+
+async function decodeRecording(mediaBlob) {
+    const decoder = new OfflineAudioContext(1, 1, SAMPLE_RATE);
+    const decoded = await decoder.decodeAudioData(await mediaBlob.arrayBuffer());
+    const frames = Math.min(decoded.length, MAX_SECONDS * SAMPLE_RATE);
+    if (frames < SAMPLE_RATE / 20) throw new Error("The recording is too short. Try again.");
+    const renderer = new OfflineAudioContext(1, frames, SAMPLE_RATE);
+    const source = renderer.createBufferSource();
+    source.buffer = decoded;
+    source.connect(renderer.destination);
+    source.start();
+    const rendered = await renderer.startRendering();
+    return rendered.getChannelData(0);
+}
+
+function clearClip() {
+    if (clip) URL.revokeObjectURL(clip.url);
+    clip = null;
+    player.removeAttribute("src");
+    player.load();
+    player.hidden = true;
+    byId("timingControls").hidden = true;
+    byId("waveHint").hidden = false;
+    byId("wavePanel").classList.remove("has-audio");
+    byId("clock").textContent = "0.000 s";
+    Object.values(timing).forEach(field => { field.value = ""; });
+    draw();
+}
+
+function setClip(samples) {
+    clearClip();
+    const wav = wavBlob(samples);
+    const duration = samples.length / SAMPLE_RATE;
+    clip = {id: crypto.randomUUID(), samples, wav, duration, url: URL.createObjectURL(wav)};
+    player.src = clip.url;
+    player.hidden = false;
+    byId("timingControls").hidden = false;
+    byId("waveHint").hidden = true;
+    byId("wavePanel").classList.add("has-audio");
+    const end = (Math.floor(duration * 1000) / 1000).toFixed(3);
+    Object.values(timing).forEach(field => { field.max = end; });
+    timing.turnEnd.value = end;
+    byId("clock").textContent = end + " s";
+    updateOutcome();
+}
+
+async function toggleRecording() {
+    if (busy) return;
+    if (recorder?.state === "recording") {
+        busy = true;
+        recorder.stop();
+        refreshControls();
+        return;
+    }
+
+    busy = true;
+    refreshControls();
+    status("");
+    let stream;
+    try {
+        if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+            throw new Error("Microphone recording requires a supported browser on localhost or HTTPS.");
+        }
+        stream = await navigator.mediaDevices.getUserMedia({audio: {channelCount: 1}});
+        player.pause();
+        const chunks = [];
+        recorder = new MediaRecorder(stream);
+        let recordingError;
+        recorder.addEventListener("dataavailable", event => {
+            if (event.data.size) chunks.push(event.data);
+        });
+        recorder.addEventListener("error", event => { recordingError = event.error; });
+        recorder.addEventListener("stop", async () => {
+            busy = true;
+            refreshControls();
+            stream.getTracks().forEach(track => track.stop());
+            clearInterval(clockTimer);
+            clearTimeout(stopTimer);
+            try {
+                if (recordingError) throw recordingError;
+                setClip(await decodeRecording(new Blob(chunks, {type: recorder.mimeType})));
+                status("Recording ready. Mark the timing and add the expected outcome.");
+            } catch (error) {
+                byId("clock").textContent = (clip ? clip.duration.toFixed(3) : "0.000") + " s";
+                status("Could not read the recording. " + error.message, "error");
+            } finally {
+                recorder = null;
+                busy = false;
+                refreshControls();
+            }
+        }, {once: true});
+        recorder.start();
+        const started = performance.now();
+        clockTimer = setInterval(() => {
+            byId("clock").textContent = ((performance.now() - started) / 1000).toFixed(3) + " s";
+        }, 100);
+        stopTimer = setTimeout(() => {
+            if (recorder?.state === "recording") toggleRecording();
+        }, MAX_SECONDS * 1000);
+        status("Recording.");
+    } catch (error) {
+        stream?.getTracks().forEach(track => track.stop());
+        recorder = null;
+        status("Could not start the microphone. " + error.message, "error");
+    } finally {
+        busy = false;
+        refreshControls();
+    }
+}
+
+async function togglePrimaryAction() {
+    if (busy) return;
+    if (!clip || recorder?.state === "recording") {
+        await toggleRecording();
+    } else if (player.paused || player.ended) {
+        try {
+            await player.play();
+        } catch (error) {
+            status("Could not play the clip. " + error.message, "error");
+        }
+    } else {
+        player.pause();
+    }
+}
+
+primaryButton.addEventListener("click", togglePrimaryAction);
+recordAgainButton.addEventListener("click", toggleRecording);
+document.addEventListener("keydown", event => {
+    if (event.code !== "Space" || event.repeat || event.altKey || event.ctrlKey || event.metaKey ||
+        event.target.closest("button, input, textarea, select, audio, summary, a, [contenteditable]")) return;
+    event.preventDefault();
+    togglePrimaryAction();
+});
+
+function encodeWav(wav) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(",", 2)[1]);
+        reader.onerror = () => reject(new Error("Could not read the WAV file."));
+        reader.readAsDataURL(wav);
+    });
+}
+
+form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (saveButton.disabled) return;
+    busy = true;
+    refreshControls();
+    try {
+        const outcome = outcomeSelect.value;
+        const tool = outcome === "no_call" ? null : activeTool();
+        if (outcome !== "no_call" && !tool) throw new Error("Choose the expected tool.");
+        if (!timing.turnEnd.value) throw new Error("Mark the end of the turn.");
+        let args = null;
+        if (outcome === "call") {
+            if (!timing.ready.value) throw new Error("Mark when the tool becomes ready.");
+            try {
+                args = JSON.parse(byId("arguments").value);
+            } catch {
+                throw new Error("Enter a valid JSON object for the arguments.");
+            }
+            if (!args || Array.isArray(args) || typeof args !== "object") {
+                throw new Error("Enter the arguments as a JSON object.");
+            }
+        }
+        if (outcome === "underspecified" && !timing.intent.value) throw new Error("Mark when the tool intent becomes clear.");
+        status("Saving…");
+        await request("api/clips", {
+            id: clip.id,
+            wav_base64: await encodeWav(clip.wav),
+            speaker_id: byId("speaker").value,
+            transcript: byId("transcript").value,
+            catalog_id: catalogSelect.value,
+            outcome,
+            tool: tool?.name ?? null,
+            arguments: args,
+            ready_s: outcome === "call" ? timing.ready.valueAsNumber : null,
+            intent_s: tool && timing.intent.value ? timing.intent.valueAsNumber : null,
+            turn_end_s: timing.turnEnd.valueAsNumber,
+        });
+        clearClip();
+        byId("transcript").value = "";
+        showSchema();
+        status("Example saved. Press Space to record the next clip.", "success");
+    } catch (error) {
+        status(error.message, "error");
+        return;
+    } finally {
+        busy = false;
+        refreshControls();
+    }
+    primaryButton.focus();
+});
+
+request("api/catalogs").then(list => {
+    catalogs = list;
+    selectCatalog();
+}).catch(error => status(error.message, "error"));
+draw();
+</script>
+</body>
+</html>
